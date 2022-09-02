@@ -126,8 +126,9 @@ fn suspend_xcm_execution_works() {
 		let messages = vec![(ParaId::from(999), 1u32.into(), message_format.as_slice())];
 
 		// This should have executed the incoming XCM, because it came from a system parachain
-		XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
-
+		let weight = XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
+		println!("wweight is 1 {:?}", weight);
+		println!("System events {:?}", crate::mock::events());
 		let queued_xcm = InboundXcmpMessages::<Test>::get(ParaId::from(999), 1u32);
 		assert!(queued_xcm.is_empty());
 
@@ -240,5 +241,28 @@ fn update_xcmp_max_individual_weight() {
 		let data: QueueConfigData = <QueueConfig<Test>>::get();
 
 		assert_eq!(data.xcmp_max_individual_weight, 30u64 * WEIGHT_PER_MILLIS);
+	});
+}
+
+#[test]
+fn force_suspend_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(XcmpQueue::force_suspend_inbound_para_execution(
+			Origin::root(),
+			ParaId::from(2000)
+		));
+
+		let xcm = VersionedXcm::from(Xcm::<Call>(vec![Instruction::<Call>::ClearOrigin])).encode();
+		let mut message_format = XcmpMessageFormat::ConcatenatedVersionedXcm.encode();
+		message_format.extend(xcm.clone());
+		let messages = vec![
+			(ParaId::from(2000), 1u32.into(), message_format.as_slice()),
+			(ParaId::from(2001), 1u32.into(), message_format.as_slice()),
+		];
+
+		let weight = XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
+		println!("wweight is {:?}", weight);
+		let queued_xcm = InboundXcmpMessages::<Test>::get(ParaId::from(2000), 1u32);
+		assert!(queued_xcm.is_empty());
 	});
 }

@@ -257,6 +257,47 @@ pub mod pallet {
 
 			Ok(())
 		}
+
+		/// Force suspend execution coming from a specific paraID
+		///
+		/// - `origin`: Must pass `Root`.
+		#[pallet::weight((T::DbWeight::get().writes(1), DispatchClass::Operational,))]
+		pub fn force_suspend_inbound_para_execution(origin: OriginFor<T>, para: ParaId) -> DispatchResult {
+			ensure_root(origin)?;
+			Self::set_inbound_channel_status(para, InboundState::Blocked);
+			Ok(())
+		}
+
+		/// Resume suspend execution coming from a specific paraID
+		///
+		/// - `origin`: Must pass `Root`.
+		#[pallet::weight((T::DbWeight::get().writes(1), DispatchClass::Operational,))]
+		pub fn force_resume_inbound_para_execution(origin: OriginFor<T>, para: ParaId) -> DispatchResult {
+			ensure_root(origin)?;
+			Self::set_inbound_channel_status(para, InboundState::Ok);
+			Ok(())
+		}
+
+		/// Force suspend sending to a specific paraID
+		///
+		/// - `origin`: Must pass `Root`.
+		#[pallet::weight((T::DbWeight::get().writes(1), DispatchClass::Operational,))]
+		pub fn force_suspend_outbound_para_execution(origin: OriginFor<T>, para: ParaId) -> DispatchResult {
+			ensure_root(origin)?;
+			Self::set_outbound_channel_status(para, OutboundState::Blocked);
+			Ok(())
+		}
+
+		/// Force resume suspend sending to a specific paraID
+		///
+		/// - `origin`: Must pass `Root`.
+		#[pallet::weight((T::DbWeight::get().writes(1), DispatchClass::Operational,))]
+		pub fn force_resume_outbound_para_execution(origin: OriginFor<T>, para: ParaId) -> DispatchResult {
+			ensure_root(origin)?;
+			Self::set_outbound_channel_status(para, OutboundState::Ok);
+			Ok(())
+		}
+
 	}
 
 	#[pallet::event]
@@ -363,12 +404,14 @@ pub mod pallet {
 pub enum InboundState {
 	Ok,
 	Suspended,
+	Blocked
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Encode, Decode, RuntimeDebug, TypeInfo)]
 pub enum OutboundState {
 	Ok,
 	Suspended,
+	Blocked
 }
 
 /// Struct containing detailed information about the inbound channel.
@@ -383,6 +426,26 @@ pub struct InboundChannelDetails {
 	/// Contains info about the relay block number that the message was sent at, and the format
 	/// of the incoming message.
 	message_metadata: Vec<(RelayBlockNumber, XcmpMessageFormat)>,
+}
+
+impl InboundChannelDetails {
+	pub fn new(sender: ParaId) -> InboundChannelDetails {
+		InboundChannelDetails {
+			sender,
+			state: InboundState::Ok,
+			message_metadata: vec![]
+		}
+	}
+
+	pub fn with_suspended_state(mut self) -> InboundChannelDetails {
+		self.state = InboundState::Suspended;
+		self
+	}
+
+	pub fn with_blocked_state(mut self) -> InboundChannelDetails {
+		self.state = InboundState::Blocked;
+		self
+	}
 }
 
 /// Struct containing detailed information about the outbound channel.
@@ -655,8 +718,12 @@ impl<T: Config> Pallet<T> {
 						&mut remaining_fragments,
 					) {
 						let weight = max_weight - weight_used;
+						println!("Handling message");
 						match Self::handle_xcm_message(sender, sent_at, xcm, weight) {
-							Ok(used) => weight_used = weight_used.saturating_add(used),
+							Ok(used) => {
+								println!("weight used after handle {:?}", used);
+								weight_used = weight_used.saturating_add(used)
+							},
 							Err(XcmError::WeightLimitReached(required))
 								if required > max_individual_weight.ref_time() =>
 							{
@@ -684,6 +751,7 @@ impl<T: Config> Pallet<T> {
 								break
 							},
 							Err(error) => {
+								println!("error is {:?}", error);
 								log::error!(
 									"Failed to process XCMP-XCM message, caused by {:?}",
 									error
@@ -730,6 +798,7 @@ impl<T: Config> Pallet<T> {
 		if is_empty {
 			<InboundXcmpMessages<T>>::remove(sender, sent_at);
 		} else {
+			println!("Inserting");
 			<InboundXcmpMessages<T>>::insert(sender, sent_at, remaining_fragments);
 		}
 		(weight_used, is_empty)
@@ -779,6 +848,7 @@ impl<T: Config> Pallet<T> {
 	/// for the second &c. though empirical and or practical factors may give rise to adjusting it
 	/// further.
 	fn service_xcmp_queue(max_weight: Weight) -> Weight {
+		println!("servicing");
 		let suspended = QueueSuspended::<T>::get();
 
 		let mut status = <InboundXcmpStatus<T>>::get(); // <- sorted.
@@ -845,12 +915,15 @@ impl<T: Config> Pallet<T> {
 			} else {
 				// Process up to one block's worth for now.
 				let weight_remaining = weight_available.saturating_sub(weight_used);
+				
 				let (weight_processed, is_empty) = Self::process_xcmp_message(
 					sender,
 					status[index].message_metadata[0],
 					weight_remaining,
 					xcmp_max_individual_weight,
 				);
+				println!("weight processed {:?}", weight_processed);
+
 				if is_empty {
 					status[index].message_metadata.remove(0);
 				}
@@ -882,6 +955,8 @@ impl<T: Config> Pallet<T> {
 			shuffle_index += 1;
 		}
 
+		println!("status is {:?}", status[0].state);
+
 		// Only retain the senders that have non-empty queues.
 		status.retain(|item| !item.message_metadata.is_empty());
 
@@ -889,7 +964,7 @@ impl<T: Config> Pallet<T> {
 		weight_used
 	}
 
-	fn suspend_channel(target: ParaId) {
+	fn suspend_outbound_channel(target: ParaId) {
 		<OutboundXcmpStatus<T>>::mutate(|s| {
 			if let Some(details) = s.iter_mut().find(|item| item.recipient == target) {
 				let ok = details.state == OutboundState::Ok;
@@ -919,6 +994,28 @@ impl<T: Config> Pallet<T> {
 			}
 		});
 	}
+
+	// Force status of an outbound channel
+	fn set_outbound_channel_status(target: ParaId, state: OutboundState) {
+		<OutboundXcmpStatus<T>>::mutate(|s| {
+			if let Some(details) = s.iter_mut().find(|item| item.recipient == target) {
+				details.state = state;
+			}
+		});
+	}
+	
+	// Force status of an inbound channel
+	fn set_inbound_channel_status(target: ParaId, state: InboundState) {
+		<InboundXcmpStatus<T>>::mutate(|s| {
+			if let Some(details) = s.iter_mut().find(|item| item.sender == target) {
+				details.state = state;
+			}
+			else {
+				s.push(InboundChannelDetails::new(target).with_blocked_state());
+			}
+		});
+	}
+	
 }
 
 impl<T: Config> XcmpMessageHandler for Pallet<T> {
@@ -926,6 +1023,7 @@ impl<T: Config> XcmpMessageHandler for Pallet<T> {
 		iter: I,
 		max_weight: Weight,
 	) -> Weight {
+		println!("entering here");
 		let mut status = <InboundXcmpStatus<T>>::get();
 
 		let QueueConfigData { suspend_threshold, drop_threshold, .. } = <QueueConfig<T>>::get();
@@ -947,7 +1045,7 @@ impl<T: Config> XcmpMessageHandler for Pallet<T> {
 				while !data_ref.is_empty() {
 					use ChannelSignal::*;
 					match ChannelSignal::decode(&mut data_ref) {
-						Ok(Suspend) => Self::suspend_channel(sender),
+						Ok(Suspend) => Self::suspend_outbound_channel(sender),
 						Ok(Resume) => Self::resume_channel(sender),
 						Err(_) => break,
 					}
@@ -957,6 +1055,11 @@ impl<T: Config> XcmpMessageHandler for Pallet<T> {
 				match status.binary_search_by_key(&sender, |item| item.sender) {
 					Ok(i) => {
 						let count = status[i].message_metadata.len();
+						if status[i].state == InboundState::Blocked {
+							println!("DROPPING");
+							// Ignore other checks
+							continue;
+						}
 						if count as u32 >= suspend_threshold && status[i].state == InboundState::Ok
 						{
 							status[i].state = InboundState::Suspended;
@@ -970,18 +1073,24 @@ impl<T: Config> XcmpMessageHandler for Pallet<T> {
 						if (count as u32) < drop_threshold {
 							status[i].message_metadata.push((sent_at, format));
 						} else {
+							println!("DROPPING");
 							debug_assert!(
 								false,
 								"XCMP channel queue full. Silently dropping message"
 							);
+
 						}
 					},
-					Err(_) => status.push(InboundChannelDetails {
+					Err(_) => {
+						println!("PUSHING NEW");
+						status.push(InboundChannelDetails {
 						sender,
 						state: InboundState::Ok,
 						message_metadata: vec![(sent_at, format)],
-					}),
+					})
+					},
 				}
+				println!("Inserting");
 				// Queue the payload for later execution.
 				<InboundXcmpMessages<T>>::insert(sender, sent_at, data_ref);
 			}
