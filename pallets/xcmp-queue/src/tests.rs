@@ -126,9 +126,7 @@ fn suspend_xcm_execution_works() {
 		let messages = vec![(ParaId::from(999), 1u32.into(), message_format.as_slice())];
 
 		// This should have executed the incoming XCM, because it came from a system parachain
-		let weight = XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
-		println!("wweight is 1 {:?}", weight);
-		println!("System events {:?}", crate::mock::events());
+		XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
 		let queued_xcm = InboundXcmpMessages::<Test>::get(ParaId::from(999), 1u32);
 		assert!(queued_xcm.is_empty());
 
@@ -245,24 +243,109 @@ fn update_xcmp_max_individual_weight() {
 }
 
 #[test]
-fn force_suspend_works() {
+fn force_block_and_resume_works() {
 	new_test_ext().execute_with(|| {
-		assert_ok!(XcmpQueue::force_suspend_inbound_para_execution(
+		assert_ok!(XcmpQueue::force_block_inbound_para_execution(
 			Origin::root(),
 			ParaId::from(2000)
 		));
+		let xcm = VersionedXcm::from(Xcm::<Call>(vec![Instruction::<Call>::ClearOrigin])).encode();
+		let mut message_format = XcmpMessageFormat::ConcatenatedVersionedXcm.encode();
+		message_format.extend(xcm.clone());
+		let messages = vec![(ParaId::from(2000), 1u32.into(), message_format.as_slice())];
 
+		let weight = XcmpQueue::handle_xcmp_messages(messages.clone().into_iter(), Weight::MAX);
+		let queued_xcm = InboundXcmpMessages::<Test>::get(ParaId::from(2000), 1u32);
+		// We make sure the queue is empty, and that the returned weight is 0
+		assert!(queued_xcm.is_empty());
+		assert_eq!(weight, Weight::from_ref_time(0));
+
+		// Status blocked should be maintained
+		let weight = XcmpQueue::handle_xcmp_messages(messages.clone().into_iter(), Weight::MAX);
+
+		assert!(queued_xcm.is_empty());
+		assert_eq!(weight, Weight::from_ref_time(0));
+
+		// Resume
+		assert_ok!(XcmpQueue::force_resume_inbound_para_execution(
+			Origin::root(),
+			ParaId::from(2000)
+		));
+		let weight = XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
+
+		// One instruction processed
+		assert!(queued_xcm.is_empty());
+		assert_eq!(weight, Weight::from_ref_time(1000000));
+	});
+}
+
+#[test]
+fn suspended_state_should_not_be_affected_by_force_block() {
+	new_test_ext().execute_with(|| {
+		// Simplest scenario to simulate suspension, decay is 0
+		assert_ok!(XcmpQueue::update_weight_restrict_decay(
+			Origin::root(),
+			Weight::from_ref_time(0)
+		));
+
+		// We use one instruction weight as max weight
+		let max_weight = Weight::from_ref_time(crate::mock::UnitWeightCost::get());
+
+		// First we need to generate the suspended state
 		let xcm = VersionedXcm::from(Xcm::<Call>(vec![Instruction::<Call>::ClearOrigin])).encode();
 		let mut message_format = XcmpMessageFormat::ConcatenatedVersionedXcm.encode();
 		message_format.extend(xcm.clone());
 		let messages = vec![
 			(ParaId::from(2000), 1u32.into(), message_format.as_slice()),
-			(ParaId::from(2001), 1u32.into(), message_format.as_slice()),
+			(ParaId::from(2000), 2u32.into(), message_format.as_slice()),
+			(ParaId::from(2000), 3u32.into(), message_format.as_slice()),
+			(ParaId::from(2000), 4u32.into(), message_format.as_slice()),
 		];
 
-		let weight = XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
-		println!("wweight is {:?}", weight);
-		let queued_xcm = InboundXcmpMessages::<Test>::get(ParaId::from(2000), 1u32);
-		assert!(queued_xcm.is_empty());
+		// One should have been executed, the rest queued
+		let weight = XcmpQueue::handle_xcmp_messages(messages.clone().into_iter(), max_weight);
+		let status = <InboundXcmpStatus<Test>>::get();
+		assert_eq!(weight, Weight::from_ref_time(1000000));
+
+		// assert channel status is suspended
+		assert_eq!(status[0].state, InboundState::Suspended);
+
+		assert_ok!(XcmpQueue::force_block_inbound_para_execution(
+			Origin::root(),
+			ParaId::from(2000)
+		));
+
+		let status = <InboundXcmpStatus<Test>>::get();
+		// assert channel status is blocked
+		assert_eq!(status[0].state, InboundState::Blocked);
+		// but metadata len is the same
+		assert_eq!(status[0].message_metadata.len(), 3);
+
+		// Now we resume. Resuming sets the channel to OK, but we should put again suspended when we process
+		// the first message
+		// The only downside of this is that we will send the suspend signal again
+		assert_ok!(XcmpQueue::force_resume_inbound_para_execution(
+			Origin::root(),
+			ParaId::from(2000)
+		));
+		let status = <InboundXcmpStatus<Test>>::get();
+		// assert channel status is blocked
+		assert_eq!(status[0].state, InboundState::Ok);
+		// but metadata len is the same
+		assert_eq!(status[0].message_metadata.len(), 3);
+
+		// We insert a new message
+		let single_message = vec![(ParaId::from(2000), 6u32.into(), message_format.as_slice())];
+
+		// One of the pending messages will be executed, the rest will not
+		// and we need to add the latter message sent, which should again put it to suspended
+		let weight = XcmpQueue::handle_xcmp_messages(single_message.into_iter(), max_weight);
+		assert_eq!(weight, Weight::from_ref_time(1000000));
+		let status = <InboundXcmpStatus<Test>>::get();
+
+		// assert channel status is Suspended
+		assert_eq!(status[0].state, InboundState::Suspended);
+		// one in, one processed, length should be 3
+		assert_eq!(status[0].message_metadata.len(), 3);
 	});
 }

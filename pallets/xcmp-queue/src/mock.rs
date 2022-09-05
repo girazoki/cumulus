@@ -18,7 +18,10 @@ use crate as xcmp_queue;
 use core::marker::PhantomData;
 use cumulus_pallet_parachain_system::AnyRelayNumber;
 use cumulus_primitives_core::{IsSystem, ParaId};
-use frame_support::{parameter_types, traits::OriginTrait};
+use frame_support::{
+	parameter_types,
+	traits::{Everything, OriginTrait},
+};
 use frame_system::EnsureRoot;
 use sp_core::H256;
 use sp_runtime::{
@@ -27,7 +30,8 @@ use sp_runtime::{
 };
 use xcm::prelude::*;
 use xcm_builder::{
-	CurrencyAdapter, FixedWeightBounds, IsConcrete, LocationInverter, NativeAsset, ParentIsPreset,
+	AllowUnpaidExecutionFrom, CurrencyAdapter, FixedWeightBounds, IsConcrete, LocationInverter,
+	NativeAsset, ParentIsPreset,
 };
 use xcm_executor::traits::ConvertOrigin;
 
@@ -146,7 +150,7 @@ impl xcm_executor::Config for XcmConfig {
 	type IsReserve = NativeAsset;
 	type IsTeleporter = NativeAsset;
 	type LocationInverter = LocationInverter<Ancestry>;
-	type Barrier = ();
+	type Barrier = AllowUnpaidExecutionFrom<Everything>;
 	type Weigher = FixedWeightBounds<UnitWeightCost, Call, MaxInstructions>;
 	type Trader = ();
 	type ResponseHandler = ();
@@ -167,8 +171,8 @@ impl<Origin: OriginTrait> ConvertOrigin<Origin> for SystemParachainAsSuperuser<O
 		kind: OriginKind,
 	) -> Result<Origin, MultiLocation> {
 		let origin = origin.into();
-		if kind == OriginKind::Superuser &&
-			matches!(
+		if kind == OriginKind::Superuser
+			&& matches!(
 				origin,
 				MultiLocation {
 					parents: 1,
@@ -196,18 +200,4 @@ impl Config for Test {
 pub fn new_test_ext() -> sp_io::TestExternalities {
 	let t = frame_system::GenesisConfig::default().build_storage::<Test>().unwrap();
 	t.into()
-}
-
-pub(crate) fn events() -> Vec<super::Event<Test>> {
-	System::events()
-		.into_iter()
-		.map(|r| r.event)
-		.filter_map(|e| {
-			if let Event::XcmpQueue(inner) = e {
-				Some(inner)
-			} else {
-				None
-			}
-		})
-		.collect::<Vec<_>>()
 }
