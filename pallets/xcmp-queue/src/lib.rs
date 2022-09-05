@@ -389,6 +389,7 @@ pub mod pallet {
 pub enum InboundState {
 	Ok,
 	Suspended,
+	// Drop all incoming messages from this channel
 	Blocked,
 }
 
