@@ -546,9 +546,9 @@ impl<T: Config> Pallet<T> {
 		};
 		let have_active = details.last_index > details.first_index;
 		let appended = have_active &&
-		<OutboundXcmpMessages<T>>::mutate(recipient, details.last_index - 1, |s| {
-			if XcmpMessageFormat::decode_with_depth_limit(MAX_XCM_DECODE_DEPTH, &mut &s[..]) !=
-				Ok(format)
+			<OutboundXcmpMessages<T>>::mutate(recipient, details.last_index - 1, |s| {
+				if XcmpMessageFormat::decode_with_depth_limit(MAX_XCM_DECODE_DEPTH, &mut &s[..]) !=
+					Ok(format)
 				{
 					return false
 				}

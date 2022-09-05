@@ -127,7 +127,7 @@ fn suspend_xcm_execution_works() {
 
 		// This should have executed the incoming XCM, because it came from a system parachain
 		XcmpQueue::handle_xcmp_messages(messages.into_iter(), Weight::MAX);
-		
+
 		let queued_xcm = InboundXcmpMessages::<Test>::get(ParaId::from(999), 1u32);
 		assert!(queued_xcm.is_empty());
 
